@@ -1,15 +1,19 @@
 package com.example.wallpaperchanger
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.RadioGroup
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -21,6 +25,8 @@ import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
 
+    private enum class Pick { PREVIOUS, CURRENT, NEXT }
+
     private lateinit var tvFolder: TextView
     private lateinit var tvStatus: TextView
     private lateinit var tvCurrent: TextView
@@ -29,6 +35,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var tvConfigPath: TextView
     private lateinit var etDuration: EditText
     private lateinit var spUnit: Spinner
+    private lateinit var rgPreview: RadioGroup
     private lateinit var cropView: CropPreviewView
     private lateinit var ivResult: ImageView
 
@@ -38,9 +45,10 @@ class MainActivity : ComponentActivity() {
     private val io = Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences(WallpaperService.PREFS, Context.MODE_PRIVATE) }
 
-    // State for the "next image" preview
-    private var nextName: String? = null
-    private var nextBitmap: Bitmap? = null
+    // State for the image preview
+    private var pick = Pick.NEXT
+    private var previewName: String? = null
+    private var previewBitmap: Bitmap? = null
     private var ratio = 0.5f
     private var savedX: Float? = null
     private var cropX = 0.5f
@@ -79,6 +87,7 @@ class MainActivity : ComponentActivity() {
         tvConfigPath = findViewById(R.id.tvConfigPath)
         etDuration = findViewById(R.id.etDuration)
         spUnit = findViewById(R.id.spUnit)
+        rgPreview = findViewById(R.id.rgPreview)
         cropView = findViewById(R.id.cropPreview)
         ivResult = findViewById(R.id.ivResult)
 
@@ -90,6 +99,15 @@ class MainActivity : ComponentActivity() {
         prefs.getString(KEY_FOLDER, null)?.let { tvFolder.text = folderName(it) }
         showCurrent(prefs)
         tvConfigPath.text = "Crops saved to: " + CropStore.file(this).absolutePath
+
+        rgPreview.setOnCheckedChangeListener { _, id ->
+            pick = when (id) {
+                R.id.rbPrev -> Pick.PREVIOUS
+                R.id.rbCur -> Pick.CURRENT
+                else -> Pick.NEXT
+            }
+            refreshPreview()
+        }
 
         cropView.onCropChanged = { x ->
             cropX = x
@@ -106,11 +124,11 @@ class MainActivity : ComponentActivity() {
         findViewById<Button>(R.id.btnSaveCrop).setOnClickListener { saveCrop() }
         findViewById<Button>(R.id.btnResetCrop).setOnClickListener { resetCrop() }
 
-        if (android.os.Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS)
-            != android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
         ) {
-            requestNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -156,27 +174,46 @@ class MainActivity : ComponentActivity() {
         tvStatus.text = "Running: every $amount${units[spUnit.selectedItemPosition]}"
     }
 
-    /** Loads the image that will be set next, plus its saved crop, into the preview. */
+    /** Loads the picked image (previous, current or next) and its saved crop into the preview. */
     private fun refreshPreview() {
         val folder = prefs.getString(KEY_FOLDER, null)
         val ctx = applicationContext
+        val mode = pick
         io.execute {
             val docs = listImages(ctx, folder)
             val byUri = docs.associateBy { it.uri.toString() }
-            val nextUri = ImageQueue(prefs).peek(docs.map { it.uri.toString() })
-            val doc: DocumentFile? = nextUri?.let { byUri[it] }
+            val queue = ImageQueue(prefs)
+            val uri = when (mode) {
+                Pick.NEXT -> queue.peek(docs.map { it.uri.toString() })
+                Pick.CURRENT -> queue.current()
+                Pick.PREVIOUS -> queue.previous()
+            }
+            val doc: DocumentFile? = uri?.let { byUri[it] }
             val bmp = doc?.let { decodeScaled(ctx, it.uri, PREVIEW_MAX_PX) }
             val r = targetRatio(ctx)
             val name = doc?.name
             val saved = name?.let { CropStore.get(ctx, it) }
 
+            val fallback = when {
+                folder == null -> "choose a folder"
+                uri == null && mode == Pick.NEXT -> "no images in folder"
+                uri == null -> "nothing shown yet"
+                else -> "no longer in folder"
+            }
+
             runOnUiThread {
-                nextName = name
-                nextBitmap = bmp
+                if (mode != pick) return@runOnUiThread // user switched tabs while loading
+                previewName = name
+                previewBitmap = bmp
                 ratio = r
                 savedX = saved
                 cropX = saved ?: 0.5f
-                tvNextName.text = "Next: " + (name ?: if (folder == null) "choose a folder" else "no images in folder")
+                val label = when (mode) {
+                    Pick.PREVIOUS -> "Previous"
+                    Pick.CURRENT -> "Current"
+                    Pick.NEXT -> "Next"
+                }
+                tvNextName.text = "$label: " + (name ?: fallback)
                 cropView.setImage(bmp, r, cropX)
                 updateResult()
                 updateCropInfo()
@@ -186,7 +223,7 @@ class MainActivity : ComponentActivity() {
 
     /** Shows what the wallpaper will look like with the current crop position. */
     private fun updateResult() {
-        val bmp = nextBitmap
+        val bmp = previewBitmap
         if (bmp == null) {
             ivResult.setImageDrawable(null)
             return
@@ -197,17 +234,24 @@ class MainActivity : ComponentActivity() {
     private fun updateCropInfo() {
         val s = savedX
         val status = when {
-            nextName == null -> ""
+            previewName == null -> ""
             s == null && cropX == 0.5f -> "Using center crop (nothing saved)."
             s == null -> "Position %.2f, not saved.".format(cropX)
             cropX != s -> "Saved %.2f, now %.2f, not saved.".format(s, cropX)
             else -> "Saved crop: %.2f.".format(s)
         }
-        tvCropInfo.text = status
+        // Current and previous images are already on screen or were, so a saved crop
+        // only takes effect the next time that image comes up. Nothing is re-set now.
+        val hint = if (pick != Pick.NEXT && previewName != null) {
+            " Applies the next time this image comes up."
+        } else {
+            ""
+        }
+        tvCropInfo.text = status + hint
     }
 
     private fun saveCrop() {
-        val name = nextName
+        val name = previewName
         if (name == null) {
             toast("No image to save a crop for")
             return
@@ -219,7 +263,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun resetCrop() {
-        val name = nextName ?: return
+        val name = previewName ?: return
         cropX = 0.5f
         cropView.setPosition(0.5f)
         CropStore.set(this, name, null)

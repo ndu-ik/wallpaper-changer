@@ -98,21 +98,29 @@ class ImageQueue(private val prefs: SharedPreferences) {
     /** The image that will be shown next. Does not consume it. */
     fun peek(all: List<String>): String? = ensure(all).firstOrNull()
 
-    /** Takes the next image and marks it as shown. */
+    /** Takes the next image and marks it as shown. The old current image becomes previous. */
     fun next(all: List<String>): String? {
         val q = ensure(all)
         val head = q.firstOrNull() ?: return null
         q.removeAt(0)
         prefs.edit()
             .putString(KEY_QUEUE, q.joinToString("\n"))
+            .putString(KEY_PREV, prefs.getString(KEY_LAST, null))
             .putString(KEY_LAST, head)
             .apply()
         return head
     }
 
+    /** The image currently on screen (URI string), or null if none yet. */
+    fun current(): String? = prefs.getString(KEY_LAST, null)
+
+    /** The image shown before the current one (URI string), or null. */
+    fun previous(): String? = prefs.getString(KEY_PREV, null)
+
     companion object {
         private const val KEY_QUEUE = "queue"
         private const val KEY_LAST = "last_shown"
+        private const val KEY_PREV = "prev_shown"
     }
 }
 

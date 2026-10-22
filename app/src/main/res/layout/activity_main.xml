@@ -70,7 +70,36 @@
             android:layout_marginTop="8dp"
             android:text="Current: none yet" />
 
-        <!-- Next image preview -->
+        <!-- Image preview: pick previous, current or next -->
+        <RadioGroup
+            android:id="@+id/rgPreview"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/rbPrev"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Previous" />
+
+            <RadioButton
+                android:id="@+id/rbCur"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Current" />
+
+            <RadioButton
+                android:id="@+id/rbNext"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:checked="true"
+                android:text="Next" />
+        </RadioGroup>
         <TextView
             android:id="@+id/tvNextName"
             android:layout_width="match_parent"
