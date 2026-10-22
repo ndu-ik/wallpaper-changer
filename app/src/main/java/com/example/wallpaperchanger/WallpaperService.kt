@@ -8,10 +8,10 @@ import android.app.Service
 import android.app.WallpaperManager
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
-import android.net.Uri
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -24,7 +24,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
+import kotlin.math.max
+import kotlin.math.min
 
 class WallpaperService : Service() {
 
@@ -57,20 +58,17 @@ class WallpaperService : Service() {
 
         job?.cancel()
         job = scope.launch {
-            var lastIndex = -1
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val queue = ImageQueue(prefs)
             while (isActive) {
-                val images = listImages(Uri.parse(folder))
-                if (images.isNotEmpty()) {
-                    var index = images.indices.random()
-                    if (images.size > 1) {
-                        while (index == lastIndex) index = images.indices.random()
-                    }
-                    lastIndex = index
-                    val file = images[index]
-                    if (setWallpaper(file)) {
+                val docs = listImages(this@WallpaperService, folder)
+                if (docs.isNotEmpty()) {
+                    val byUri = docs.associateBy { it.uri.toString() }
+                    // Non-repeating: every image once per round, never the same one twice in a row.
+                    val file = queue.next(docs.map { it.uri.toString() })?.let { byUri[it] }
+                    if (file != null && setWallpaper(file)) {
                         val name = file.name ?: "unknown"
-                        getSharedPreferences("prefs", Context.MODE_PRIVATE)
-                            .edit().putString(KEY_CURRENT, name).apply()
+                        prefs.edit().putString(KEY_CURRENT, name).apply()
                         updateNotification("Now showing: $name")
                     }
                 } else {
@@ -83,28 +81,12 @@ class WallpaperService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun listImages(treeUri: Uri): List<DocumentFile> {
-        val dir = DocumentFile.fromTreeUri(this, treeUri) ?: return emptyList()
-        return dir.listFiles().filter { file ->
-            file.isFile && (file.type?.startsWith("image/") == true ||
-                    file.name?.substringAfterLast('.', "")?.lowercase() in EXTENSIONS)
-        }
-    }
-
     /** Returns true if the wallpaper was set. */
     private fun setWallpaper(file: DocumentFile): Boolean {
         return try {
             val wm = WallpaperManager.getInstance(this)
             val metrics = resources.displayMetrics
-
-            // Aspect ratio (width / height) of the wallpaper the launcher expects.
-            val dw = wm.desiredMinimumWidth
-            val dh = wm.desiredMinimumHeight
-            val targetRatio = if (dw > 0 && dh > 0) {
-                dw.toFloat() / dh
-            } else {
-                metrics.widthPixels.toFloat() / metrics.heightPixels
-            }
+            val ratio = targetRatio(this)
 
             val source = ImageDecoder.createSource(contentResolver, file.uri)
             val decoded: Bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
@@ -112,20 +94,21 @@ class WallpaperService : Service() {
                 // Downscale very large images so we don't run out of memory.
                 val maxW = metrics.widthPixels * 2
                 val maxH = metrics.heightPixels * 2
-                val scale = minOf(
+                val scale = min(
                     1f,
-                    maxW.toFloat() / info.size.width,
-                    maxH.toFloat() / info.size.height
+                    min(maxW.toFloat() / info.size.width, maxH.toFloat() / info.size.height)
                 )
                 if (scale < 1f) {
                     decoder.setTargetSize(
-                        (info.size.width * scale).toInt().coerceAtLeast(1),
-                        (info.size.height * scale).toInt().coerceAtLeast(1)
+                        max(1, (info.size.width * scale).toInt()),
+                        max(1, (info.size.height * scale).toInt())
                     )
                 }
             }
 
-            val cropped = cropCenterToRatio(decoded, targetRatio)
+            // Saved crop for this image, or the center crop if none was saved.
+            val x = CropStore.get(this, file.name ?: "") ?: 0.5f
+            val cropped = applyCrop(decoded, ratio, x)
             wm.setBitmap(cropped)
             if (cropped !== decoded) cropped.recycle()
             decoded.recycle()
@@ -134,21 +117,6 @@ class WallpaperService : Service() {
             Log.e(TAG, "Failed to set wallpaper from ${file.name}", e)
             false
         }
-    }
-
-    /**
-     * Cuts a window out of the middle of [src] with the given width/height ratio.
-     * The window always uses the full image height (so it "zooms out" to fit),
-     * and is centered horizontally. Images already narrower than the ratio are returned unchanged.
-     */
-    private fun cropCenterToRatio(src: Bitmap, targetRatio: Float): Bitmap {
-        val w = src.width
-        val h = src.height
-        if (w.toFloat() / h <= targetRatio) return src
-
-        val cropW = (h * targetRatio).roundToInt().coerceIn(1, w)
-        val x = (w - cropW) / 2
-        return Bitmap.createBitmap(src, x, 0, cropW, h)
     }
 
     private fun buildNotification(text: String): Notification {
@@ -184,12 +152,10 @@ class WallpaperService : Service() {
     companion object {
         const val EXTRA_FOLDER = "folder"
         const val EXTRA_INTERVAL_SECONDS = "interval_seconds"
+        const val PREFS = "prefs"
         const val KEY_CURRENT = "current"
         private const val CHANNEL_ID = "wallpaper_changer"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "WallpaperService"
-        private val EXTENSIONS = setOf(
-            "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "avif"
-        )
     }
 }

@@ -1,36 +1,50 @@
 package com.example.wallpaperchanger
 
-import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.documentfile.provider.DocumentFile
+import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var tvFolder: TextView
     private lateinit var tvStatus: TextView
     private lateinit var tvCurrent: TextView
+    private lateinit var tvNextName: TextView
+    private lateinit var tvCropInfo: TextView
+    private lateinit var tvConfigPath: TextView
     private lateinit var etDuration: EditText
     private lateinit var spUnit: Spinner
+    private lateinit var cropView: CropPreviewView
+    private lateinit var ivResult: ImageView
 
-    private var folderUri: Uri? = null
     private val units = listOf("s", "m", "h")
     private val unitSeconds = listOf(1L, 60L, 3600L)
 
-    // Updates "Current:" live whenever the service changes the wallpaper.
+    private val io = Executors.newSingleThreadExecutor()
+    private val prefs by lazy { getSharedPreferences(WallpaperService.PREFS, Context.MODE_PRIVATE) }
+
+    // State for the "next image" preview
+    private var nextName: String? = null
+    private var nextBitmap: Bitmap? = null
+    private var ratio = 0.5f
+    private var savedX: Float? = null
+    private var cropX = 0.5f
+
     private val prefsListener =
         SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
             if (key == WallpaperService.KEY_CURRENT) {
@@ -44,9 +58,9 @@ class MainActivity : ComponentActivity() {
                 contentResolver.takePersistableUriPermission(
                     uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
-                folderUri = uri
-                tvFolder.text = uri.toString()
-                prefs().edit().putString(KEY_FOLDER, uri.toString()).apply()
+                prefs.edit().putString(KEY_FOLDER, uri.toString()).apply()
+                tvFolder.text = folderName(uri.toString())
+                refreshPreview()
             }
         }
 
@@ -60,19 +74,28 @@ class MainActivity : ComponentActivity() {
         tvFolder = findViewById(R.id.tvFolder)
         tvStatus = findViewById(R.id.tvStatus)
         tvCurrent = findViewById(R.id.tvCurrent)
+        tvNextName = findViewById(R.id.tvNextName)
+        tvCropInfo = findViewById(R.id.tvCropInfo)
+        tvConfigPath = findViewById(R.id.tvConfigPath)
         etDuration = findViewById(R.id.etDuration)
         spUnit = findViewById(R.id.spUnit)
+        cropView = findViewById(R.id.cropPreview)
+        ivResult = findViewById(R.id.ivResult)
 
         spUnit.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, units
         )
         spUnit.setSelection(1) // default: minutes
 
-        prefs().getString(KEY_FOLDER, null)?.let {
-            folderUri = Uri.parse(it)
-            tvFolder.text = it
+        prefs.getString(KEY_FOLDER, null)?.let { tvFolder.text = folderName(it) }
+        showCurrent(prefs)
+        tvConfigPath.text = "Crops saved to: " + CropStore.file(this).absolutePath
+
+        cropView.onCropChanged = { x ->
+            cropX = x
+            updateResult()
+            updateCropInfo()
         }
-        showCurrent(prefs())
 
         findViewById<Button>(R.id.btnPickFolder).setOnClickListener { pickFolder.launch(null) }
         findViewById<Button>(R.id.btnStart).setOnClickListener { start() }
@@ -80,54 +103,143 @@ class MainActivity : ComponentActivity() {
             stopService(Intent(this, WallpaperService::class.java))
             tvStatus.text = "Stopped"
         }
+        findViewById<Button>(R.id.btnSaveCrop).setOnClickListener { saveCrop() }
+        findViewById<Button>(R.id.btnResetCrop).setOnClickListener { resetCrop() }
 
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
-            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+            requestNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
     override fun onStart() {
         super.onStart()
-        prefs().registerOnSharedPreferenceChangeListener(prefsListener)
-        showCurrent(prefs())
+        prefs.registerOnSharedPreferenceChangeListener(prefsListener)
+        showCurrent(prefs)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshPreview()
     }
 
     override fun onStop() {
-        prefs().unregisterOnSharedPreferenceChangeListener(prefsListener)
+        prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         super.onStop()
     }
 
+    override fun onDestroy() {
+        io.shutdownNow()
+        super.onDestroy()
+    }
+
     private fun start() {
-        val uri = folderUri
-        if (uri == null) {
-            Toast.makeText(this, "Choose a folder first", Toast.LENGTH_SHORT).show()
+        val folder = prefs.getString(KEY_FOLDER, null)
+        if (folder == null) {
+            toast("Choose a folder first")
             return
         }
         val amount = etDuration.text.toString().toLongOrNull()
         if (amount == null || amount <= 0) {
-            Toast.makeText(this, "Enter a valid duration", Toast.LENGTH_SHORT).show()
+            toast("Enter a valid duration")
             return
         }
         val seconds = amount * unitSeconds[spUnit.selectedItemPosition]
 
         val intent = Intent(this, WallpaperService::class.java).apply {
-            putExtra(WallpaperService.EXTRA_FOLDER, uri.toString())
+            putExtra(WallpaperService.EXTRA_FOLDER, folder)
             putExtra(WallpaperService.EXTRA_INTERVAL_SECONDS, seconds)
         }
         ContextCompat.startForegroundService(this, intent)
         tvStatus.text = "Running: every $amount${units[spUnit.selectedItemPosition]}"
     }
 
+    /** Loads the image that will be set next, plus its saved crop, into the preview. */
+    private fun refreshPreview() {
+        val folder = prefs.getString(KEY_FOLDER, null)
+        val ctx = applicationContext
+        io.execute {
+            val docs = listImages(ctx, folder)
+            val byUri = docs.associateBy { it.uri.toString() }
+            val nextUri = ImageQueue(prefs).peek(docs.map { it.uri.toString() })
+            val doc: DocumentFile? = nextUri?.let { byUri[it] }
+            val bmp = doc?.let { decodeScaled(ctx, it.uri, PREVIEW_MAX_PX) }
+            val r = targetRatio(ctx)
+            val name = doc?.name
+            val saved = name?.let { CropStore.get(ctx, it) }
+
+            runOnUiThread {
+                nextName = name
+                nextBitmap = bmp
+                ratio = r
+                savedX = saved
+                cropX = saved ?: 0.5f
+                tvNextName.text = "Next: " + (name ?: if (folder == null) "choose a folder" else "no images in folder")
+                cropView.setImage(bmp, r, cropX)
+                updateResult()
+                updateCropInfo()
+            }
+        }
+    }
+
+    /** Shows what the wallpaper will look like with the current crop position. */
+    private fun updateResult() {
+        val bmp = nextBitmap
+        if (bmp == null) {
+            ivResult.setImageDrawable(null)
+            return
+        }
+        ivResult.setImageBitmap(applyCrop(bmp, ratio, cropX))
+    }
+
+    private fun updateCropInfo() {
+        val s = savedX
+        val status = when {
+            nextName == null -> ""
+            s == null && cropX == 0.5f -> "Using center crop (nothing saved)."
+            s == null -> "Position %.2f, not saved.".format(cropX)
+            cropX != s -> "Saved %.2f, now %.2f, not saved.".format(s, cropX)
+            else -> "Saved crop: %.2f.".format(s)
+        }
+        tvCropInfo.text = status
+    }
+
+    private fun saveCrop() {
+        val name = nextName
+        if (name == null) {
+            toast("No image to save a crop for")
+            return
+        }
+        CropStore.set(this, name, cropX)
+        savedX = cropX
+        updateCropInfo()
+        toast("Crop saved")
+    }
+
+    private fun resetCrop() {
+        val name = nextName ?: return
+        cropX = 0.5f
+        cropView.setPosition(0.5f)
+        CropStore.set(this, name, null)
+        savedX = null
+        updateResult()
+        updateCropInfo()
+        toast("Reset to center crop")
+    }
+
     private fun showCurrent(p: SharedPreferences) {
         tvCurrent.text = "Current: " + (p.getString(WallpaperService.KEY_CURRENT, null) ?: "none yet")
     }
 
-    private fun prefs() = getSharedPreferences("prefs", Context.MODE_PRIVATE)
+    private fun folderName(uriStr: String): String =
+        DocumentFile.fromTreeUri(this, Uri.parse(uriStr))?.name ?: uriStr
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     companion object {
         private const val KEY_FOLDER = "folder"
+        private const val PREVIEW_MAX_PX = 1600
     }
 }
