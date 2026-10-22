@@ -3,6 +3,7 @@ package com.example.wallpaperchanger
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -21,12 +22,21 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var tvFolder: TextView
     private lateinit var tvStatus: TextView
+    private lateinit var tvCurrent: TextView
     private lateinit var etDuration: EditText
     private lateinit var spUnit: Spinner
 
     private var folderUri: Uri? = null
     private val units = listOf("s", "m", "h")
     private val unitSeconds = listOf(1L, 60L, 3600L)
+
+    // Updates "Current:" live whenever the service changes the wallpaper.
+    private val prefsListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
+            if (key == WallpaperService.KEY_CURRENT) {
+                runOnUiThread { showCurrent(p) }
+            }
+        }
 
     private val pickFolder =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -49,6 +59,7 @@ class MainActivity : ComponentActivity() {
 
         tvFolder = findViewById(R.id.tvFolder)
         tvStatus = findViewById(R.id.tvStatus)
+        tvCurrent = findViewById(R.id.tvCurrent)
         etDuration = findViewById(R.id.etDuration)
         spUnit = findViewById(R.id.spUnit)
 
@@ -61,6 +72,7 @@ class MainActivity : ComponentActivity() {
             folderUri = Uri.parse(it)
             tvFolder.text = it
         }
+        showCurrent(prefs())
 
         findViewById<Button>(R.id.btnPickFolder).setOnClickListener { pickFolder.launch(null) }
         findViewById<Button>(R.id.btnStart).setOnClickListener { start() }
@@ -75,6 +87,17 @@ class MainActivity : ComponentActivity() {
         ) {
             requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        prefs().registerOnSharedPreferenceChangeListener(prefsListener)
+        showCurrent(prefs())
+    }
+
+    override fun onStop() {
+        prefs().unregisterOnSharedPreferenceChangeListener(prefsListener)
+        super.onStop()
     }
 
     private fun start() {
@@ -96,6 +119,10 @@ class MainActivity : ComponentActivity() {
         }
         ContextCompat.startForegroundService(this, intent)
         tvStatus.text = "Running: every $amount${units[spUnit.selectedItemPosition]}"
+    }
+
+    private fun showCurrent(p: SharedPreferences) {
+        tvCurrent.text = "Current: " + (p.getString(WallpaperService.KEY_CURRENT, null) ?: "none yet")
     }
 
     private fun prefs() = getSharedPreferences("prefs", Context.MODE_PRIVATE)
