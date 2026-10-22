@@ -113,6 +113,15 @@
             android:layout_height="wrap_content"
             android:text="Drag the white box to choose the crop. Dark areas are cut off." />
 
+        <ProgressBar
+            android:id="@+id/pbPreview"
+            style="?android:attr/progressBarStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+
         <com.example.wallpaperchanger.CropPreviewView
             android:id="@+id/cropPreview"
             android:layout_width="match_parent"

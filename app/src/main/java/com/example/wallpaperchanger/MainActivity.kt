@@ -9,10 +9,13 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.LruCache
+import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.ProgressBar
 import android.widget.RadioGroup
 import android.widget.Spinner
 import android.widget.TextView
@@ -36,16 +39,32 @@ class MainActivity : ComponentActivity() {
     private lateinit var etDuration: EditText
     private lateinit var spUnit: Spinner
     private lateinit var rgPreview: RadioGroup
+    private lateinit var pbPreview: ProgressBar
     private lateinit var cropView: CropPreviewView
     private lateinit var ivResult: ImageView
 
     private val units = listOf("s", "m", "h")
     private val unitSeconds = listOf(1L, 60L, 3600L)
 
-    private val io = Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences(WallpaperService.PREFS, Context.MODE_PRIVATE) }
 
-    // State for the image preview
+    // Loads the visible preview. Prefetch warms the other two without blocking it.
+    private val loader = Executors.newSingleThreadExecutor()
+    private val prefetcher = Executors.newSingleThreadExecutor()
+
+    // Decoded previews, keyed by image URI, so switching tabs is usually instant.
+    private val previewCache = object : LruCache<String, Bitmap>(CACHE_BYTES) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
+    // Folder listing, reused when switching tabs (only re-read on open or folder change).
+    private var cachedFolder: String? = null
+    private var cachedDocs: List<DocumentFile> = emptyList()
+
+    // Bumped on every refresh so slow, outdated loads are ignored.
+    private var loadGen = 0
+
+    // State for the preview
     private var pick = Pick.NEXT
     private var previewName: String? = null
     private var previewBitmap: Bitmap? = null
@@ -68,7 +87,7 @@ class MainActivity : ComponentActivity() {
                 )
                 prefs.edit().putString(KEY_FOLDER, uri.toString()).apply()
                 tvFolder.text = folderName(uri.toString())
-                refreshPreview()
+                refreshPreview(relist = true)
             }
         }
 
@@ -88,6 +107,7 @@ class MainActivity : ComponentActivity() {
         etDuration = findViewById(R.id.etDuration)
         spUnit = findViewById(R.id.spUnit)
         rgPreview = findViewById(R.id.rgPreview)
+        pbPreview = findViewById(R.id.pbPreview)
         cropView = findViewById(R.id.cropPreview)
         ivResult = findViewById(R.id.ivResult)
 
@@ -106,7 +126,7 @@ class MainActivity : ComponentActivity() {
                 R.id.rbCur -> Pick.CURRENT
                 else -> Pick.NEXT
             }
-            refreshPreview()
+            refreshPreview(relist = false)
         }
 
         cropView.onCropChanged = { x ->
@@ -140,7 +160,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        refreshPreview()
+        refreshPreview(relist = true)
     }
 
     override fun onStop() {
@@ -149,7 +169,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        io.shutdownNow()
+        loader.shutdownNow()
+        prefetcher.shutdownNow()
         super.onDestroy()
     }
 
@@ -174,26 +195,43 @@ class MainActivity : ComponentActivity() {
         tvStatus.text = "Running: every $amount${units[spUnit.selectedItemPosition]}"
     }
 
-    /** Loads the picked image (previous, current or next) and its saved crop into the preview. */
-    private fun refreshPreview() {
+    /**
+     * Loads the picked image (previous, current or next) and its saved crop.
+     * [relist] re-reads the folder; otherwise the cached listing is used.
+     */
+    private fun refreshPreview(relist: Boolean) {
+        val gen = ++loadGen
         val folder = prefs.getString(KEY_FOLDER, null)
         val ctx = applicationContext
         val mode = pick
-        io.execute {
-            val docs = listImages(ctx, folder)
-            val byUri = docs.associateBy { it.uri.toString() }
-            val queue = ImageQueue(prefs)
-            val uri = when (mode) {
-                Pick.NEXT -> queue.peek(docs.map { it.uri.toString() })
-                Pick.CURRENT -> queue.current()
-                Pick.PREVIOUS -> queue.previous()
+        showLoading(mode)
+
+        loader.execute {
+            if (gen != loadGen) return@execute
+            if (relist || folder != cachedFolder) {
+                cachedDocs = listImages(ctx, folder)
+                cachedFolder = folder
             }
+            val docs = cachedDocs
+            val byUri = docs.associateBy { it.uri.toString() }
+
+            val queue = ImageQueue(prefs)
+            val nextUri = queue.peek(docs.map { it.uri.toString() })
+            val currentUri = queue.current()
+            val previousUri = queue.previous()
+            val uri = when (mode) {
+                Pick.NEXT -> nextUri
+                Pick.CURRENT -> currentUri
+                Pick.PREVIOUS -> previousUri
+            }
+
             val doc: DocumentFile? = uri?.let { byUri[it] }
-            val bmp = doc?.let { decodeScaled(ctx, it.uri, PREVIEW_MAX_PX) }
+            val bmp = doc?.let { loadPreview(ctx, it.uri.toString(), it.uri) }
+            if (gen != loadGen) return@execute
+
             val r = targetRatio(ctx)
             val name = doc?.name
             val saved = name?.let { CropStore.get(ctx, it) }
-
             val fallback = when {
                 folder == null -> "choose a folder"
                 uri == null && mode == Pick.NEXT -> "no images in folder"
@@ -202,23 +240,54 @@ class MainActivity : ComponentActivity() {
             }
 
             runOnUiThread {
-                if (mode != pick) return@runOnUiThread // user switched tabs while loading
+                if (gen != loadGen) return@runOnUiThread
                 previewName = name
                 previewBitmap = bmp
                 ratio = r
                 savedX = saved
                 cropX = saved ?: 0.5f
-                val label = when (mode) {
-                    Pick.PREVIOUS -> "Previous"
-                    Pick.CURRENT -> "Current"
-                    Pick.NEXT -> "Next"
-                }
-                tvNextName.text = "$label: " + (name ?: fallback)
+                tvNextName.text = "${labelOf(mode)}: " + (name ?: fallback)
                 cropView.setImage(bmp, r, cropX)
                 updateResult()
                 updateCropInfo()
+                pbPreview.visibility = View.GONE
+            }
+
+            // Warm the cache for the other images so switching tabs is instant.
+            val warm = listOfNotNull(nextUri, currentUri, previousUri).filter { it != uri }.distinct()
+            prefetcher.execute {
+                for (u in warm) {
+                    byUri[u]?.let { loadPreview(ctx, u, it.uri) }
+                }
             }
         }
+    }
+
+    /** Clears the old preview at once and shows a spinner while the new one loads. */
+    private fun showLoading(mode: Pick) {
+        previewName = null
+        previewBitmap = null
+        savedX = null
+        cropX = 0.5f
+        cropView.setImage(null, ratio, 0.5f)
+        ivResult.setImageDrawable(null)
+        tvCropInfo.text = ""
+        tvNextName.text = "${labelOf(mode)}: loading…"
+        pbPreview.visibility = View.VISIBLE
+    }
+
+    private fun labelOf(mode: Pick): String = when (mode) {
+        Pick.PREVIOUS -> "Previous"
+        Pick.CURRENT -> "Current"
+        Pick.NEXT -> "Next"
+    }
+
+    /** Cached decode of a preview image. Safe to call from any background thread. */
+    private fun loadPreview(ctx: Context, key: String, uri: Uri): Bitmap? {
+        previewCache.get(key)?.let { return it }
+        val b = decodeScaled(ctx, uri, PREVIEW_MAX_PX) ?: return null
+        previewCache.put(key, b)
+        return b
     }
 
     /** Shows what the wallpaper will look like with the current crop position. */
@@ -284,6 +353,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val KEY_FOLDER = "folder"
-        private const val PREVIEW_MAX_PX = 1600
+        private const val PREVIEW_MAX_PX = 1200
+        private const val CACHE_BYTES = 24 * 1024 * 1024
     }
 }
