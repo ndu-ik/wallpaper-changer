@@ -55,6 +55,8 @@ class WallpaperService : Service() {
             buildNotification("Starting..."),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         )
+        isRunning = true
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_RUNNING, true).apply()
 
         job?.cancel()
         job = scope.launch {
@@ -145,6 +147,9 @@ class WallpaperService : Service() {
     }
 
     override fun onDestroy() {
+        // KEY_RUNNING is deliberately left as-is: if the system killed us, the watchdog
+        // sees "should be running but isn't" and restarts us. Stop sets it to false.
+        isRunning = false
         scope.cancel()
         super.onDestroy()
     }
@@ -154,6 +159,11 @@ class WallpaperService : Service() {
         const val EXTRA_INTERVAL_SECONDS = "interval_seconds"
         const val PREFS = "prefs"
         const val KEY_CURRENT = "current"
+        const val KEY_RUNNING = "running"
+
+        /** True while this process's service is alive. Resets to false if the process dies. */
+        @Volatile
+        var isRunning = false
         private const val CHANNEL_ID = "wallpaper_changer"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "WallpaperService"

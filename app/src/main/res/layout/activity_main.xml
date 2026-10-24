@@ -70,6 +70,41 @@
             android:layout_marginTop="8dp"
             android:text="Current: none yet" />
 
+        <!-- Watchdog: restarts the wallpaper if Android stops it -->
+        <CheckBox
+            android:id="@+id/cbWatchdog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="Keep running (watchdog)" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_vertical"
+                android:text="Check every (minutes, min 15)" />
+
+            <EditText
+                android:id="@+id/etWatchMinutes"
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:inputType="number"
+                android:text="15" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnBattery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Allow background running (battery)" />
+
         <!-- Image preview: pick previous, current or next -->
         <RadioGroup
             android:id="@+id/rgPreview"
@@ -100,11 +135,12 @@
                 android:checked="true"
                 android:text="Next" />
         </RadioGroup>
+
         <TextView
             android:id="@+id/tvNextName"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="32dp"
+            android:layout_marginTop="16dp"
             android:textStyle="bold"
             android:text="Next: ..." />
 

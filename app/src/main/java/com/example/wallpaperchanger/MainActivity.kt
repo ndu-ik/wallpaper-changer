@@ -9,10 +9,14 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
+import android.util.Log
 import android.util.LruCache
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -37,6 +41,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var tvCropInfo: TextView
     private lateinit var tvConfigPath: TextView
     private lateinit var etDuration: EditText
+    private lateinit var etWatchMinutes: EditText
+    private lateinit var cbWatchdog: CheckBox
     private lateinit var spUnit: Spinner
     private lateinit var rgPreview: RadioGroup
     private lateinit var pbPreview: ProgressBar
@@ -52,8 +58,8 @@ class MainActivity : ComponentActivity() {
     private val loader = Executors.newSingleThreadExecutor()
     private val prefetcher = Executors.newSingleThreadExecutor()
 
-    // Decoded previews, keyed by image URI, so switching tabs is usually instant.
-    private val previewCache = object : LruCache<String, Bitmap>(CACHE_BYTES) {
+    // Thumbnails, keyed by image URI, so switching tabs is usually instant.
+    private val thumbCache = object : LruCache<String, Bitmap>(CACHE_BYTES) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
 
@@ -105,6 +111,8 @@ class MainActivity : ComponentActivity() {
         tvCropInfo = findViewById(R.id.tvCropInfo)
         tvConfigPath = findViewById(R.id.tvConfigPath)
         etDuration = findViewById(R.id.etDuration)
+        etWatchMinutes = findViewById(R.id.etWatchMinutes)
+        cbWatchdog = findViewById(R.id.cbWatchdog)
         spUnit = findViewById(R.id.spUnit)
         rgPreview = findViewById(R.id.rgPreview)
         pbPreview = findViewById(R.id.pbPreview)
@@ -117,6 +125,8 @@ class MainActivity : ComponentActivity() {
         spUnit.setSelection(1) // default: minutes
 
         prefs.getString(KEY_FOLDER, null)?.let { tvFolder.text = folderName(it) }
+        cbWatchdog.isChecked = prefs.getBoolean(KEY_WATCH_ON, false)
+        etWatchMinutes.setText(prefs.getLong(KEY_WATCH_MIN, 15L).toString())
         showCurrent(prefs)
         tvConfigPath.text = "Crops saved to: " + CropStore.file(this).absolutePath
 
@@ -137,10 +147,8 @@ class MainActivity : ComponentActivity() {
 
         findViewById<Button>(R.id.btnPickFolder).setOnClickListener { pickFolder.launch(null) }
         findViewById<Button>(R.id.btnStart).setOnClickListener { start() }
-        findViewById<Button>(R.id.btnStop).setOnClickListener {
-            stopService(Intent(this, WallpaperService::class.java))
-            tvStatus.text = "Stopped"
-        }
+        findViewById<Button>(R.id.btnStop).setOnClickListener { stop() }
+        findViewById<Button>(R.id.btnBattery).setOnClickListener { requestBatteryExemption() }
         findViewById<Button>(R.id.btnSaveCrop).setOnClickListener { saveCrop() }
         findViewById<Button>(R.id.btnResetCrop).setOnClickListener { resetCrop() }
 
@@ -187,12 +195,56 @@ class MainActivity : ComponentActivity() {
         }
         val seconds = amount * unitSeconds[spUnit.selectedItemPosition]
 
+        prefs.edit().putLong(WatchdogWorker.KEY_INTERVAL, seconds).apply()
         val intent = Intent(this, WallpaperService::class.java).apply {
             putExtra(WallpaperService.EXTRA_FOLDER, folder)
             putExtra(WallpaperService.EXTRA_INTERVAL_SECONDS, seconds)
         }
         ContextCompat.startForegroundService(this, intent)
         tvStatus.text = "Running: every $amount${units[spUnit.selectedItemPosition]}"
+        applyWatchdog()
+    }
+
+    private fun stop() {
+        // Stop means "don't run": the watchdog will not restart the service after this.
+        prefs.edit().putBoolean(WallpaperService.KEY_RUNNING, false).apply()
+        stopService(Intent(this, WallpaperService::class.java))
+        tvStatus.text = "Stopped"
+    }
+
+    /** Turns the watchdog on or off from the checkbox and minutes box. */
+    private fun applyWatchdog() {
+        val on = cbWatchdog.isChecked
+        val requested = etWatchMinutes.text.toString().toLongOrNull()
+        if (requested == null || requested <= 0) {
+            toast("Enter the check interval in minutes")
+            return
+        }
+        prefs.edit()
+            .putBoolean(KEY_WATCH_ON, on)
+            .putLong(KEY_WATCH_MIN, requested)
+            .apply()
+        if (on) {
+            val used = Watchdog.enable(this, requested)
+            if (used != requested) {
+                toast("Android allows checks every ${Watchdog.MIN_MINUTES} min at most often. Using ${used} min.")
+                etWatchMinutes.setText(used.toString())
+            }
+        } else {
+            Watchdog.disable(this)
+        }
+    }
+
+    private fun requestBatteryExemption() {
+        val pm = getSystemService(PowerManager::class.java)
+        if (pm.isIgnoringBatteryOptimizations(packageName)) {
+            toast("Already allowed to run in the background")
+            return
+        }
+        startActivity(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                .setData(Uri.parse("package:$packageName"))
+        )
     }
 
     /**
@@ -207,57 +259,70 @@ class MainActivity : ComponentActivity() {
         showLoading(mode)
 
         loader.execute {
-            if (gen != loadGen) return@execute
-            if (relist || folder != cachedFolder) {
-                cachedDocs = listImages(ctx, folder)
-                cachedFolder = folder
-            }
-            val docs = cachedDocs
-            val byUri = docs.associateBy { it.uri.toString() }
+            try {
+                if (gen != loadGen) return@execute
+                if (relist || folder != cachedFolder) {
+                    cachedDocs = listImages(ctx, folder)
+                    cachedFolder = folder
+                }
+                val docs = cachedDocs
+                val byUri = docs.associateBy { it.uri.toString() }
 
-            val queue = ImageQueue(prefs)
-            val nextUri = queue.peek(docs.map { it.uri.toString() })
-            val currentUri = queue.current()
-            val previousUri = queue.previous()
-            val uri = when (mode) {
-                Pick.NEXT -> nextUri
-                Pick.CURRENT -> currentUri
-                Pick.PREVIOUS -> previousUri
-            }
+                val queue = ImageQueue(prefs)
+                val nextUri = queue.peek(docs.map { it.uri.toString() })
+                val currentUri = queue.current()
+                val previousUri = queue.previous()
+                val uri = when (mode) {
+                    Pick.NEXT -> nextUri
+                    Pick.CURRENT -> currentUri
+                    Pick.PREVIOUS -> previousUri
+                }
 
-            val doc: DocumentFile? = uri?.let { byUri[it] }
-            val bmp = doc?.let { loadPreview(ctx, it.uri.toString(), it.uri) }
-            if (gen != loadGen) return@execute
+                val doc: DocumentFile? = uri?.let { byUri[it] }
+                val bmp = doc?.let { loadThumb(ctx, it) }
+                if (gen != loadGen) return@execute
 
-            val r = targetRatio(ctx)
-            val name = doc?.name
-            val saved = name?.let { CropStore.get(ctx, it) }
-            val fallback = when {
-                folder == null -> "choose a folder"
-                uri == null && mode == Pick.NEXT -> "no images in folder"
-                uri == null -> "nothing shown yet"
-                else -> "no longer in folder"
-            }
+                val r = targetRatio(ctx)
+                val name = doc?.name
+                val saved = name?.let { CropStore.get(ctx, it) }
+                val fallback = when {
+                    folder == null -> "choose a folder"
+                    uri == null && mode == Pick.NEXT -> "no images in folder"
+                    uri == null -> "nothing shown yet"
+                    else -> "no longer in folder"
+                }
 
-            runOnUiThread {
-                if (gen != loadGen) return@runOnUiThread
-                previewName = name
-                previewBitmap = bmp
-                ratio = r
-                savedX = saved
-                cropX = saved ?: 0.5f
-                tvNextName.text = "${labelOf(mode)}: " + (name ?: fallback)
-                cropView.setImage(bmp, r, cropX)
-                updateResult()
-                updateCropInfo()
-                pbPreview.visibility = View.GONE
-            }
+                runOnUiThread {
+                    if (gen != loadGen) return@runOnUiThread
+                    previewName = name
+                    previewBitmap = bmp
+                    ratio = r
+                    savedX = saved
+                    cropX = saved ?: 0.5f
+                    tvNextName.text = "${labelOf(mode)}: " + (name ?: fallback)
+                    if (doc != null && bmp == null) {
+                        cropView.showMessage("Couldn't load this image")
+                    } else {
+                        cropView.setImage(bmp, r, cropX)
+                    }
+                    updateResult()
+                    updateCropInfo()
+                    pbPreview.visibility = View.GONE
+                }
 
-            // Warm the cache for the other images so switching tabs is instant.
-            val warm = listOfNotNull(nextUri, currentUri, previousUri).filter { it != uri }.distinct()
-            prefetcher.execute {
-                for (u in warm) {
-                    byUri[u]?.let { loadPreview(ctx, u, it.uri) }
+                // Warm the cache for the other images so switching tabs is instant.
+                val warm = listOfNotNull(nextUri, currentUri, previousUri).filter { it != uri }.distinct()
+                prefetcher.execute {
+                    for (u in warm) {
+                        byUri[u]?.let { loadThumb(ctx, it) }
+                    }
+                }
+            } catch (t: Throwable) {
+                // Without this the spinner would stay on forever.
+                Log.e(TAG, "Preview failed", t)
+                runOnUiThread {
+                    if (gen != loadGen) return@runOnUiThread
+                    showError("Couldn't load preview (${t.javaClass.simpleName})")
                 }
             }
         }
@@ -276,17 +341,27 @@ class MainActivity : ComponentActivity() {
         pbPreview.visibility = View.VISIBLE
     }
 
+    private fun showError(text: String) {
+        previewName = null
+        previewBitmap = null
+        cropView.showMessage(text)
+        ivResult.setImageDrawable(null)
+        tvCropInfo.text = ""
+        pbPreview.visibility = View.GONE
+    }
+
     private fun labelOf(mode: Pick): String = when (mode) {
         Pick.PREVIOUS -> "Previous"
         Pick.CURRENT -> "Current"
         Pick.NEXT -> "Next"
     }
 
-    /** Cached decode of a preview image. Safe to call from any background thread. */
-    private fun loadPreview(ctx: Context, key: String, uri: Uri): Bitmap? {
-        previewCache.get(key)?.let { return it }
-        val b = decodeScaled(ctx, uri, PREVIEW_MAX_PX) ?: return null
-        previewCache.put(key, b)
+    /** Cached thumbnail of an image. Safe to call from background threads. */
+    private fun loadThumb(ctx: Context, doc: DocumentFile): Bitmap? {
+        val key = doc.uri.toString()
+        thumbCache.get(key)?.let { return it }
+        val b = thumbnail(ctx, doc) ?: return null
+        thumbCache.put(key, b)
         return b
     }
 
@@ -352,8 +427,10 @@ class MainActivity : ComponentActivity() {
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     companion object {
+        private const val TAG = "MainActivity"
         private const val KEY_FOLDER = "folder"
-        private const val PREVIEW_MAX_PX = 1200
+        private const val KEY_WATCH_ON = "watch_on"
+        private const val KEY_WATCH_MIN = "watch_min"
         private const val CACHE_BYTES = 24 * 1024 * 1024
     }
 }
