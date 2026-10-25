@@ -12,6 +12,7 @@ import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
+import android.net.Uri
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -43,6 +44,12 @@ class WallpaperService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_RESET_CURRENT) {
+            // Re-sets the image on screen with its new crop. Does not touch the timer.
+            reapplyCurrent()
+            return START_NOT_STICKY
+        }
+
         val folder = intent?.getStringExtra(EXTRA_FOLDER)
         val intervalSeconds = intent?.getLongExtra(EXTRA_INTERVAL_SECONDS, 60L) ?: 60L
         if (folder == null) {
@@ -81,6 +88,19 @@ class WallpaperService : Service() {
             }
         }
         return START_NOT_STICKY
+    }
+
+    /** Sets the current image again, using its latest saved crop. */
+    private fun reapplyCurrent() {
+        val wasRunning = isRunning
+        scope.launch {
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val uri = ImageQueue(prefs).current()
+            val doc = uri?.let { DocumentFile.fromSingleUri(this@WallpaperService, Uri.parse(it)) }
+            if (doc != null) setWallpaper(doc)
+            // If the service wasn't running, it was only started for this; stop it again.
+            if (!wasRunning) stopSelf()
+        }
     }
 
     /** Returns true if the wallpaper was set. */
@@ -160,6 +180,7 @@ class WallpaperService : Service() {
         const val PREFS = "prefs"
         const val KEY_CURRENT = "current"
         const val KEY_RUNNING = "running"
+        const val ACTION_RESET_CURRENT = "com.example.wallpaperchanger.RESET_CURRENT"
 
         /** True while this process's service is alive. Resets to false if the process dies. */
         @Volatile

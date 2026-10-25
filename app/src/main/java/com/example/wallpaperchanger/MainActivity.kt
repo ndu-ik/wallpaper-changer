@@ -386,10 +386,11 @@ class MainActivity : ComponentActivity() {
         }
         // Current and previous images are already on screen or were, so a saved crop
         // only takes effect the next time that image comes up. Nothing is re-set now.
-        val hint = if (pick != Pick.NEXT && previewName != null) {
-            " Applies the next time this image comes up."
-        } else {
-            ""
+        val hint = when {
+            previewName == null -> ""
+            pick == Pick.CURRENT -> " Saving re-sets the wallpaper now; the timer keeps going."
+            pick == Pick.PREVIOUS -> " Applies the next time this image comes up."
+            else -> ""
         }
         // Debug line: screen shape vs image shape. Remove once the crop bug is confirmed fixed.
         val img = previewBitmap
@@ -410,7 +411,15 @@ class MainActivity : ComponentActivity() {
         CropStore.set(this, name, cropX)
         savedX = cropX
         updateCropInfo()
-        toast("Crop saved")
+        if (pick == Pick.CURRENT) {
+            // Re-set the image on screen with the new crop. The timer is not affected.
+            val intent = Intent(this, WallpaperService::class.java)
+                .setAction(WallpaperService.ACTION_RESET_CURRENT)
+            startService(intent)
+            toast("Crop saved, wallpaper updated")
+        } else {
+            toast("Crop saved")
+        }
     }
 
     private fun resetCrop() {
