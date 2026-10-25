@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import android.view.WindowManager
-import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.graphics.Rect
