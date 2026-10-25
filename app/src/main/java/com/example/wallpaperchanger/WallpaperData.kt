@@ -1,7 +1,8 @@
 package com.example.wallpaperchanger
 
-import android.app.WallpaperManager
 import android.content.Context
+import android.os.Build
+import android.view.WindowManager
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
@@ -28,14 +29,25 @@ fun listImages(ctx: Context, treeUri: String?): List<DocumentFile> {
     }
 }
 
-/** Width/height ratio of the wallpaper the launcher expects. */
+/**
+ * Shape of the screen as a portrait ratio (short side / long side), e.g. 0.46 for a tall phone.
+ * Uses the screen's own size rather than WallpaperManager's desired size, which can report
+ * a wrong (landscape) value shortly after the app opens. Being portrait-only means
+ * orientation changes don't affect it.
+ */
 fun targetRatio(ctx: Context): Float {
-    val wm = WallpaperManager.getInstance(ctx)
-    val dw = wm.desiredMinimumWidth
-    val dh = wm.desiredMinimumHeight
-    if (dw > 0 && dh > 0) return dw.toFloat() / dh
-    val m = ctx.resources.displayMetrics
-    return m.widthPixels.toFloat() / m.heightPixels
+    val w: Int
+    val h: Int
+    if (Build.VERSION.SDK_INT >= 30) {
+        val bounds = ctx.getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
+        w = bounds.width()
+        h = bounds.height()
+    } else {
+        val m = ctx.resources.displayMetrics
+        w = m.widthPixels
+        h = m.heightPixels
+    }
+    return min(w, h).toFloat() / max(w, h).toFloat()
 }
 
 /**

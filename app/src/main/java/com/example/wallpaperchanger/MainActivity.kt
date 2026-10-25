@@ -391,7 +391,14 @@ class MainActivity : ComponentActivity() {
         } else {
             ""
         }
-        tvCropInfo.text = status + hint
+        // Debug line: screen shape vs image shape. Remove once the crop bug is confirmed fixed.
+        val img = previewBitmap
+        val debug = if (img != null) {
+            "\n[debug: screen %.2f, image %.2f]".format(ratio, img.width.toFloat() / img.height)
+        } else {
+            ""
+        }
+        tvCropInfo.text = status + hint + debug
     }
 
     private fun saveCrop() {
