@@ -13,7 +13,8 @@ import kotlin.math.min
 
 /**
  * Shows the whole image with the wallpaper crop window drawn on it.
- * Drag horizontally to move the window. [position] is 0 (left edge) to 1 (right edge).
+ * The window moves sideways when the photo is wider than the shape (portrait cut),
+ * and up and down when it is narrower (landscape cut). [position] is 0 to 1.
  * Named "position" rather than "x" so it doesn't clash with View.getX()/setX().
  */
 class CropPreviewView @JvmOverloads constructor(
@@ -28,6 +29,9 @@ class CropPreviewView @JvmOverloads constructor(
     private var ratio = 0.5f
     var position = 0.5f
         private set
+
+    // Set on each draw: true when the window slides sideways, false when it slides up/down.
+    private var slidesSideways = true
 
     private val imgPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val dimPaint = Paint().apply { color = 0xAA000000.toInt() }
@@ -88,16 +92,26 @@ class CropPreviewView @JvmOverloads constructor(
         imgRect.set(ix, iy, ix + iw, iy + ih)
         canvas.drawBitmap(b, null, imgRect, imgPaint)
 
-        if (b.width.toFloat() / b.height > ratio) {
-            // Image is wider than the screen shape: the window cuts off the sides.
-            val cw = ih * ratio
-            val left = ix + (iw - cw) * position
-            winRect.set(left, iy, left + cw, iy + ih)
-            canvas.drawRect(imgRect.left, imgRect.top, winRect.left, imgRect.bottom, dimPaint)
-            canvas.drawRect(winRect.right, imgRect.top, imgRect.right, imgRect.bottom, dimPaint)
-        } else {
-            // Image is already narrow enough: the whole image is used, nothing to move.
-            winRect.set(imgRect)
+        val imgRatio = b.width.toFloat() / b.height
+        slidesSideways = imgRatio > ratio
+        when {
+            imgRatio > ratio -> {
+                // Photo wider than the shape: full height kept, window slides sideways.
+                val cw = ih * ratio
+                val left = ix + (iw - cw) * position
+                winRect.set(left, iy, left + cw, iy + ih)
+                canvas.drawRect(imgRect.left, imgRect.top, winRect.left, imgRect.bottom, dimPaint)
+                canvas.drawRect(winRect.right, imgRect.top, imgRect.right, imgRect.bottom, dimPaint)
+            }
+            imgRatio < ratio -> {
+                // Photo narrower than the shape: full width kept, window slides up and down.
+                val ch = iw / ratio
+                val top = iy + (ih - ch) * position
+                winRect.set(ix, top, ix + iw, top + ch)
+                canvas.drawRect(imgRect.left, imgRect.top, imgRect.right, winRect.top, dimPaint)
+                canvas.drawRect(imgRect.left, winRect.bottom, imgRect.right, imgRect.bottom, dimPaint)
+            }
+            else -> winRect.set(imgRect)
         }
         canvas.drawRect(winRect, borderPaint)
     }
@@ -107,13 +121,18 @@ class CropPreviewView @JvmOverloads constructor(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
-                val range = imgRect.width() - winRect.width()
-                if (range > 0f) {
-                    val p = ((event.x - imgRect.left) - winRect.width() / 2f) / range
-                    position = p.coerceIn(0f, 1f)
-                    invalidate()
-                    onCropChanged?.invoke(position)
+                val p: Float = if (slidesSideways) {
+                    val range = imgRect.width() - winRect.width()
+                    if (range <= 0f) return true
+                    ((event.x - imgRect.left) - winRect.width() / 2f) / range
+                } else {
+                    val range = imgRect.height() - winRect.height()
+                    if (range <= 0f) return true
+                    ((event.y - imgRect.top) - winRect.height() / 2f) / range
                 }
+                position = p.coerceIn(0f, 1f)
+                invalidate()
+                onCropChanged?.invoke(position)
                 return true
             }
         }

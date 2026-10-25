@@ -8,10 +8,9 @@ import android.app.Service
 import android.app.WallpaperManager
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
-import android.graphics.ImageDecoder
+import android.graphics.Rect
 import android.net.Uri
 import android.os.IBinder
 import android.util.Log
@@ -25,8 +24,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.max
-import kotlin.math.min
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 
 class WallpaperService : Service() {
 
@@ -103,37 +102,28 @@ class WallpaperService : Service() {
         }
     }
 
-    /** Returns true if the wallpaper was set. */
+    /**
+     * Cuts the window out of the photo at full resolution and sets it.
+     * No scaling and no lossy encoding: the cut goes to Android as a lossless PNG.
+     */
     private fun setWallpaper(file: DocumentFile): Boolean {
         return try {
-            val wm = WallpaperManager.getInstance(this)
-            val metrics = resources.displayMetrics
-            val ratio = targetRatio(this, readCropMode(getSharedPreferences(PREFS, Context.MODE_PRIVATE)))
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val mode = effectiveCropMode(this, readCropMode(prefs))
+            val ratio = targetRatio(this, mode)
+            val info = readPhotoInfo(this, file.uri)
+                ?: throw IllegalStateException("can't read photo size")
+            val pos = CropStore.get(this, file.name ?: "", mode) ?: 0.5f
+            val rect = cropRect(info.displayW, info.displayH, ratio, pos)
+                ?: Rect(0, 0, info.displayW, info.displayH)
+            val cut = cutPhoto(this, file.uri, info, rect)
+                ?: throw IllegalStateException("cut failed")
 
-            val source = ImageDecoder.createSource(contentResolver, file.uri)
-            val decoded: Bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                // Downscale very large images so we don't run out of memory.
-                val maxW = metrics.widthPixels * 2
-                val maxH = metrics.heightPixels * 2
-                val scale = min(
-                    1f,
-                    min(maxW.toFloat() / info.size.width, maxH.toFloat() / info.size.height)
-                )
-                if (scale < 1f) {
-                    decoder.setTargetSize(
-                        max(1, (info.size.width * scale).toInt()),
-                        max(1, (info.size.height * scale).toInt())
-                    )
-                }
+            val png = ByteArrayOutputStream().also {
+                cut.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
-
-            // Saved crop for this image, or the center crop if none was saved.
-            val x = CropStore.get(this, file.name ?: "") ?: 0.5f
-            val cropped = applyCrop(decoded, ratio, x)
-            wm.setBitmap(cropped)
-            if (cropped !== decoded) cropped.recycle()
-            decoded.recycle()
+            cut.recycle()
+            WallpaperManager.getInstance(this).setStream(ByteArrayInputStream(png.toByteArray()))
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set wallpaper from ${file.name}", e)
@@ -185,6 +175,7 @@ class WallpaperService : Service() {
         /** True while this process's service is alive. Resets to false if the process dies. */
         @Volatile
         var isRunning = false
+
         private const val CHANNEL_ID = "wallpaper_changer"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "WallpaperService"

@@ -31,4 +31,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // WorkManager: periodic background watchdog that survives app/process death and reboots
     implementation("androidx.work:work-runtime:2.9.1")
+    // Reads a photo's rotation tag so the cut is taken the right way round
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }

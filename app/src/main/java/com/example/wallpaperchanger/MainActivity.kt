@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
     private var previewName: String? = null
     private var previewBitmap: Bitmap? = null
     private var ratio = 0.5f
+    private var shapeMode = CropMode.PORTRAIT
     private var savedX: Float? = null
     private var cropX = 0.5f
 
@@ -301,9 +302,10 @@ class MainActivity : ComponentActivity() {
                 val bmp = doc?.let { loadThumb(ctx, it) }
                 if (gen != loadGen) return@execute
 
-                val r = targetRatio(ctx, readCropMode(prefs))
+                val shape = effectiveCropMode(ctx, readCropMode(prefs))
+                val r = targetRatio(ctx, shape)
                 val name = doc?.name
-                val saved = name?.let { CropStore.get(ctx, it) }
+                val saved = name?.let { CropStore.get(ctx, it, shape) }
                 val fallback = when {
                     folder == null -> "choose a folder"
                     uri == null && mode == Pick.NEXT -> "no images in folder"
@@ -314,6 +316,7 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     if (gen != loadGen) return@runOnUiThread
                     previewName = name
+                    shapeMode = shape
                     previewBitmap = bmp
                     ratio = r
                     savedX = saved
@@ -427,7 +430,7 @@ class MainActivity : ComponentActivity() {
             toast("No image to save a crop for")
             return
         }
-        CropStore.set(this, name, cropX)
+        CropStore.set(this, name, shapeMode, cropX)
         savedX = cropX
         updateCropInfo()
         if (pick == Pick.CURRENT) {
@@ -445,7 +448,7 @@ class MainActivity : ComponentActivity() {
         val name = previewName ?: return
         cropX = 0.5f
         cropView.setPosition(0.5f)
-        CropStore.set(this, name, null)
+        CropStore.set(this, name, shapeMode, null)
         savedX = null
         updateResult()
         updateCropInfo()
