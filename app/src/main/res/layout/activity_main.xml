@@ -105,6 +105,42 @@
             android:layout_marginTop="8dp"
             android:text="Allow background running (battery)" />
 
+        <!-- Crop shape: portrait, landscape or follow the phone's rotation -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            android:textStyle="bold"
+            android:text="Crop shape" />
+
+        <RadioGroup
+            android:id="@+id/rgCropMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/rbCropPortrait"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Portrait" />
+
+            <RadioButton
+                android:id="@+id/rbCropLandscape"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Landscape" />
+
+            <RadioButton
+                android:id="@+id/rbCropAuto"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Automatic" />
+        </RadioGroup>
+
         <!-- Image preview: pick previous, current or next -->
         <RadioGroup
             android:id="@+id/rgPreview"

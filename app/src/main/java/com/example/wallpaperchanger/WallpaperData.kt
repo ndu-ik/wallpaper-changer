@@ -1,6 +1,7 @@
 package com.example.wallpaperchanger
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.view.WindowManager
 import android.content.SharedPreferences
@@ -29,13 +30,24 @@ fun listImages(ctx: Context, treeUri: String?): List<DocumentFile> {
     }
 }
 
+/** Which shape the wallpaper crop window uses. */
+enum class CropMode { PORTRAIT, LANDSCAPE, AUTO }
+
+const val KEY_CROP_MODE = "crop_mode"
+
+fun readCropMode(prefs: SharedPreferences): CropMode =
+    CropMode.values().firstOrNull { it.name == prefs.getString(KEY_CROP_MODE, null) }
+        ?: CropMode.PORTRAIT
+
 /**
- * Shape of the screen as a portrait ratio (short side / long side), e.g. 0.46 for a tall phone.
- * Uses the screen's own size rather than WallpaperManager's desired size, which can report
- * a wrong (landscape) value shortly after the app opens. Being portrait-only means
- * orientation changes don't affect it.
+ * Width/height ratio of the crop window.
+ *  - PORTRAIT: the screen's tall shape (short side / long side), e.g. 720/1640 = 0.44
+ *  - LANDSCAPE: the same shape turned sideways (long / short), about 2.28
+ *  - AUTO: landscape while the phone is turned sideways right now, otherwise portrait
+ * Uses the screen's own size, not WallpaperManager's desired size, which can report a wrong
+ * value shortly after the app opens.
  */
-fun targetRatio(ctx: Context): Float {
+fun targetRatio(ctx: Context, mode: CropMode): Float {
     val w: Int
     val h: Int
     if (Build.VERSION.SDK_INT >= 30) {
@@ -47,7 +59,13 @@ fun targetRatio(ctx: Context): Float {
         w = m.widthPixels
         h = m.heightPixels
     }
-    return min(w, h).toFloat() / max(w, h).toFloat()
+    val portrait = min(w, h).toFloat() / max(w, h).toFloat()
+    val sideways = w > h
+    return when (mode) {
+        CropMode.PORTRAIT -> portrait
+        CropMode.LANDSCAPE -> 1f / portrait
+        CropMode.AUTO -> if (sideways) 1f / portrait else portrait
+    }
 }
 
 /**

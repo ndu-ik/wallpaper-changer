@@ -108,7 +108,7 @@ class WallpaperService : Service() {
         return try {
             val wm = WallpaperManager.getInstance(this)
             val metrics = resources.displayMetrics
-            val ratio = targetRatio(this)
+            val ratio = targetRatio(this, readCropMode(getSharedPreferences(PREFS, Context.MODE_PRIVATE)))
 
             val source = ImageDecoder.createSource(contentResolver, file.uri)
             val decoded: Bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->

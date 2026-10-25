@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var cbWatchdog: CheckBox
     private lateinit var spUnit: Spinner
     private lateinit var rgPreview: RadioGroup
+    private lateinit var rgCropMode: RadioGroup
     private lateinit var pbPreview: ProgressBar
     private lateinit var cropView: CropPreviewView
     private lateinit var ivResult: ImageView
@@ -115,6 +116,7 @@ class MainActivity : ComponentActivity() {
         cbWatchdog = findViewById(R.id.cbWatchdog)
         spUnit = findViewById(R.id.spUnit)
         rgPreview = findViewById(R.id.rgPreview)
+        rgCropMode = findViewById(R.id.rgCropMode)
         pbPreview = findViewById(R.id.pbPreview)
         cropView = findViewById(R.id.cropPreview)
         ivResult = findViewById(R.id.ivResult)
@@ -136,6 +138,23 @@ class MainActivity : ComponentActivity() {
                 R.id.rbCur -> Pick.CURRENT
                 else -> Pick.NEXT
             }
+            refreshPreview(relist = false)
+        }
+
+        rgCropMode.check(
+            when (readCropMode(prefs)) {
+                CropMode.PORTRAIT -> R.id.rbCropPortrait
+                CropMode.LANDSCAPE -> R.id.rbCropLandscape
+                CropMode.AUTO -> R.id.rbCropAuto
+            }
+        )
+        rgCropMode.setOnCheckedChangeListener { _, id ->
+            val mode = when (id) {
+                R.id.rbCropLandscape -> CropMode.LANDSCAPE
+                R.id.rbCropAuto -> CropMode.AUTO
+                else -> CropMode.PORTRAIT
+            }
+            prefs.edit().putString(KEY_CROP_MODE, mode.name).apply()
             refreshPreview(relist = false)
         }
 
@@ -282,7 +301,7 @@ class MainActivity : ComponentActivity() {
                 val bmp = doc?.let { loadThumb(ctx, it) }
                 if (gen != loadGen) return@execute
 
-                val r = targetRatio(ctx)
+                val r = targetRatio(ctx, readCropMode(prefs))
                 val name = doc?.name
                 val saved = name?.let { CropStore.get(ctx, it) }
                 val fallback = when {
